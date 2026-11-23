@@ -1,0 +1,6 @@
+{
+  "id": "clavis.team-sections",
+  "name": "Clavis team",
+  "apiVersion": 1,
+  "description": "Clavis in Buzz: sidebar sections per department, @tags, a Clavis profile, and polls (open and anonymous)."
+}
