@@ -10,7 +10,7 @@
 //    Synced on start, every 10 minutes and with "Sync now". Team sections are
 //    created/updated/removed to match; channels go into their team section unless
 //    the person put them in a section of their OWN (own sections are never touched).
-//    A missing or empty list changes nothing.
+//    If the canvas has no list or cannot be read, DEFAULT_SECTIONS below is used.
 //
 // 2. PROFILE FIELDS: everyone fills in their own profile on the plugin page
 //    (job title, departments, birthday, ...). Stored as the person's own signed,
@@ -48,6 +48,22 @@ const PROFILE_T = "clavis-profile-v1";
 const DEFAULT_DEPARTMENTS = [
   "uitgevers", "foreignrights", "studio", "redactie", "marketing", "sales",
   "belgie", "nederland", "clavisusa", "management", "logistiek",
+];
+// Used when the canvas of #00_begin_hier has no "Sidebar sections" list or cannot
+// be read (Buzz drops its canvas copy after channel access changes, and the relay
+// may not have it). Same format as a canvas line: "emoji Name: prefix, prefix".
+const DEFAULT_SECTIONS = [
+  "⚪ General: 00_",
+  "📚 Publishing: 01_",
+  "💼 Sales & Distribution: 02_",
+  "📊 Marketing: 03_",
+  "🌍 Fairs & Rights: 04_",
+  "✏️ Editorial: 05_",
+  "🎨 Studio: 06_",
+  "🌐 Websites: 07_",
+  "📦 Logistics: 08_",
+  "🧾 Accounting: 09_",
+  "🐉 China: 10_",
 ];
 const WEEKDAYS = [
   ["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"],
@@ -215,8 +231,12 @@ function listUnder(markdown, headingRe) {
 }
 
 function parseLayout(markdown) {
+  return parseLayoutItems(listUnder(markdown, /^#{1,6}\s*(sidebar sections|team sections|secties|zijbalk)\b/i));
+}
+
+function parseLayoutItems(items) {
   const layout = [];
-  for (const item of listUnder(markdown, /^#{1,6}\s*(sidebar sections|team sections|secties|zijbalk)\b/i)) {
+  for (const item of items) {
     const m = /^(.+?)\s*:\s*(.+)$/.exec(item);
     if (!m) continue;
     let label = m[1].replace(/\*\*/g, "").trim();
@@ -610,7 +630,7 @@ async function syncAll(session, tagsEnabled) {
     content = (await session.canvas.read(LAYOUT_CHANNEL_ID))?.content ?? "";
     canvasOk = true;
   } catch (error) {
-    setStatus("sections", `canvas of #00_begin_hier unreadable (${error?.message ?? error})`);
+    note(`Sidebar sections: canvas of #00_begin_hier unreadable (${error?.message ?? error})`);
   }
   // Departments list from the canvas, else the defaults.
   if (canvasOk) {
@@ -639,13 +659,18 @@ async function syncAll(session, tagsEnabled) {
       setStatus("tags", errorText(error));
     }
   }
-  if (canvasOk) {
-    try {
-      await syncSections(session, parseLayout(content));
-      setStatus("sections", "ok");
-    } catch (error) {
-      setStatus("sections", errorText(error));
+  try {
+    let layout = canvasOk ? parseLayout(content) : [];
+    let source = "canvas";
+    if (!layout.length) {
+      layout = parseLayoutItems(DEFAULT_SECTIONS);
+      source = "built-in list";
+      note(`No 'Sidebar sections' list in the canvas${canvasOk ? "" : " (unreadable)"}: using the built-in list.`);
     }
+    await syncSections(session, layout);
+    setStatus("sections", source === "canvas" ? "ok" : "ok (built-in list)");
+  } catch (error) {
+    setStatus("sections", errorText(error));
   }
   notify();
 }

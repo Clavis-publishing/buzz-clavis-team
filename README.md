@@ -2,7 +2,7 @@
 
 A Buzz 1.0 plugin that adapts Buzz to Clavis.
 
-- **Sidebar sections:** channels are grouped by department for everyone. The layout lives in the canvas of #00_begin_hier.
+- **Sidebar sections:** channels are grouped by department for everyone. The layout lives in the canvas of #00_begin_hier; if that canvas has no list or cannot be read, the built-in list (`DEFAULT_SECTIONS` in `plugin.js`) is used.
 - **Tags:** `@studio`, `@redactie`, … mention everyone in that department.
 - **Clavis profile:** title, departments, birthday, office or home per weekday, a favourite book, a fun fact … It shows up in the profile panel. Fill it in under *Settings → Clavis profile*.
 - **Polls:** open or anonymous, with one or more choices and an optional closing time. Open polls show the voters' profile photos. Anonymous votes are counted by the "Clavis Polls" bot on cladocker01.
