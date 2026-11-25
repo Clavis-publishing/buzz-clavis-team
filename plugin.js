@@ -7,9 +7,11 @@
 //      ## Sidebar sections
 //      - ⚪ General: 00_
 //      - 📊 Marketing: 03_
-//    Synced on start, every 10 minutes and with "Sync now". Team sections are
-//    created/updated/removed to match; channels go into their team section unless
-//    the person put them in a section of their OWN (own sections are never touched).
+//    Synced on start, when channels change, every 10 minutes and with "Sync now".
+//    Everyone gets the same team workspaces (same IDs, names, icons, order); every
+//    channel with a team prefix always goes into its team workspace. An own
+//    workspace with the same name as a team one is removed (no doubles). Own
+//    workspaces with other names stay.
 //    If the canvas has no list or cannot be read, DEFAULT_SECTIONS below is used.
 //
 // 2. PROFILE FIELDS: everyone fills in their own profile on the plugin page
@@ -561,6 +563,14 @@ async function readyStores(session) {
 
 let lastLayoutText = "";
 
+const sameName = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+
+// Everyone gets the same team workspaces: same IDs, names, icons, order and the
+// same channel filing. The team layout always wins for channels that match a
+// prefix, and a workspace of the person's own with the same name as a team
+// workspace is removed (that was the cause of the doubles: an older own
+// "Marketing" next to the team "Marketing"). Own workspaces with other names
+// stay, for channels that match no prefix and for DMs.
 async function syncSections(session, layout) {
   if (!layout.length) {
     note("No 'Sidebar sections' list in the canvas: sidebar not changed.");
@@ -578,9 +588,11 @@ async function syncSections(session, layout) {
     const lower = name.toLowerCase();
     return wanted.find((s) => s.prefixes.some((p) => lower.startsWith(p)));
   };
-  const have = new Map((prefs.snapshot().data?.sections ?? []).map((s) => [s.id, s]));
-  let created = 0, updated = 0, moved = 0, removed = 0;
+  const sections = () => prefs.snapshot().data?.sections ?? [];
+  const have = new Map(sections().map((s) => [s.id, s]));
+  let created = 0, updated = 0, moved = 0, removed = 0, reordered = false;
 
+  // 1. Team workspaces: create the ones that have channels, fix name and icon.
   const used = new Set(channels.map((c) => ruleFor(c.name)?.id).filter(Boolean));
   for (const s of wanted) {
     const current = have.get(s.id);
@@ -595,29 +607,53 @@ async function syncSections(session, layout) {
       }
     }
   }
+  const live = new Set(sections().map((s) => s.id));
+
+  // 2. Every channel with a team prefix goes into its team workspace.
   const assignments = prefs.snapshot().data?.assignments ?? {};
   for (const channel of channels) {
     const rule = ruleFor(channel.name);
-    if (!rule || !used.has(rule.id)) continue;
-    const current = assignments[channel.id];
-    if (current === rule.id) continue;
-    if (current && !isTeam(current)) continue; // the person's own section wins
+    if (!rule || !live.has(rule.id)) continue;
+    if (assignments[channel.id] === rule.id) continue;
     await prefs.assign(channel.id, rule.id);
     moved++;
   }
+
+  // 3. Remove doubles (own workspace named like a team one) and old team workspaces.
   const wantedIds = new Set(wanted.map((s) => s.id));
-  for (const s of prefs.snapshot().data?.sections ?? []) {
-    if (!isTeam(s.id) || wantedIds.has(s.id)) continue;
+  for (const s of sections()) {
+    const team = isTeam(s.id);
+    const double = !team && wanted.some((w) => live.has(w.id) && sameName(w.name, s.name));
+    const obsolete = team && !wantedIds.has(s.id);
+    if (!double && !obsolete) continue;
     if (!prefs.sectionRemovalWritable) {
-      note(`Could not remove old team section "${s.name}" right now; will retry.`);
+      note(`Could not remove ${double ? "double" : "old team"} workspace "${s.name}" right now; will retry.`);
       continue;
     }
     await prefs.removeSection(s.id);
     removed++;
   }
-  if (created || updated || moved || removed)
-    note(`Sections synced: ${created} created, ${updated} updated, ${removed} removed, ${moved} channel(s) sorted.`);
-  else note("Sections already up to date.");
+
+  // 4. Team workspaces in the layout order, where the person has them in the sidebar.
+  try {
+    const order = prefs.snapshot().data?.sectionOrder;
+    if (Array.isArray(order) && prefs.sectionOrderWritable && typeof prefs.reorderSections === "function") {
+      const teamKeys = wanted.filter((w) => live.has(w.id)).map((w) => `group:${w.id}`);
+      const inOrder = new Set(teamKeys);
+      const queue = teamKeys.filter((k) => order.includes(k));
+      const next = order.map((k) => (inOrder.has(k) ? queue.shift() : k));
+      if (next.some((k, i) => k !== order[i])) {
+        await prefs.reorderSections(teamKeys[0], next);
+        reordered = true;
+      }
+    }
+  } catch (error) {
+    note(`Workspace order not changed (${error?.message ?? error}).`);
+  }
+
+  if (created || updated || moved || removed || reordered)
+    note(`Workspaces synced: ${created} created, ${updated} updated, ${removed} removed, ${moved} channel(s) sorted${reordered ? ", order fixed" : ""}.`);
+  else note("Workspaces already up to date.");
 }
 
 // ── Sync everything, each feature isolated ───────────────────────────────
@@ -694,10 +730,16 @@ export function apply(ctx) {
     return c.status === "ready" && String(c.origin ?? c.scope ?? "").includes(COMMUNITY_HOST) ? c : undefined;
   };
 
+  let again = false;
   async function run(reason) {
     const c = currentConnection();
-    if (!c || busy) return;
+    if (!c) return;
+    if (busy) {
+      again = true; // e.g. new channels arrived during a sync: sync once more after
+      return;
+    }
     busy = true;
+    again = false;
     notify();
     try {
       if (reason) note(reason);
@@ -707,8 +749,45 @@ export function apply(ctx) {
     } finally {
       busy = false;
       notify();
+      if (again) void run();
     }
   }
+
+  // New channels (a new colleague is put in all open channels by the server
+  // within a minute, or someone creates a channel): file them right away
+  // instead of waiting for the 10-minute sync.
+  ctx.effect(() => {
+    let session, off, timer, known = "";
+    const watch = () => {
+      const c = currentConnection();
+      const next = c?.session;
+      if (next === session) return;
+      off?.();
+      off = undefined;
+      session = next;
+      known = "";
+      const list = session?.channels;
+      if (typeof list?.subscribeList !== "function") return;
+      off = list.subscribeList(() => {
+        const l = list.list();
+        if (l.status !== "ready") return;
+        const ids = l.channels.map((ch) => `${ch.id}:${ch.name}`).sort().join(",");
+        if (ids === known) return;
+        const first = !known;
+        known = ids;
+        if (first) return; // the connect sync already covers the first list
+        clearTimeout(timer);
+        timer = setTimeout(() => void run("Channels changed: syncing..."), 3000);
+      });
+    };
+    const unsubscribe = relay.subscribe(watch);
+    watch();
+    return () => {
+      unsubscribe();
+      off?.();
+      clearTimeout(timer);
+    };
+  });
 
   ctx.effect(() => {
     const check = () => {

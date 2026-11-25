@@ -2,7 +2,7 @@
 
 A Buzz 1.0 plugin that adapts Buzz to Clavis.
 
-- **Sidebar sections:** channels are grouped by department for everyone. The layout lives in the canvas of #00_begin_hier; if that canvas has no list or cannot be read, the built-in list (`DEFAULT_SECTIONS` in `plugin.js`) is used.
+- **Workspaces for everyone:** everyone gets the same team workspaces (same names, icons, order), and every channel with a team prefix always goes into its team workspace. Your own workspace with the same name as a team workspace is removed, so there are no doubles; own workspaces with other names stay. The layout lives in the canvas of #00_begin_hier; without a list there, the built-in list (`DEFAULT_SECTIONS` in `plugin.js`) is used. New channels (for example for a new colleague) are filed right away.
 - **Tags:** `@studio`, `@redactie`, … mention everyone in that department.
 - **Clavis profile:** title, departments, birthday, office or home per weekday, a favourite book, a fun fact … It shows up in the profile panel. Fill it in under *Settings → Clavis profile*.
 - **Unread counters:** a red counter with the number of unread messages (99+ above 99) on every channel and DM in the sidebar, instead of a white, bold row. Muted channels only count mentions.
