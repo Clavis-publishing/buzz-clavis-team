@@ -204,8 +204,8 @@ function note(message) {
   notify();
 }
 
-const FEATURES = { sections: "Sidebar sections", profiles: "Profiles", tags: "Tags", polls: "Polls" };
-const status = { sections: "starting", profiles: "starting", tags: "starting", polls: "starting" };
+const FEATURES = { sections: "Sidebar sections", profiles: "Profiles", tags: "Tags", polls: "Polls", unread: "Unread counters" };
+const status = { sections: "starting", profiles: "starting", tags: "starting", polls: "starting", unread: "starting" };
 function setStatus(feature, value) {
   if (status[feature] === value) return;
   status[feature] = value;
@@ -1541,6 +1541,149 @@ export function apply(ctx) {
       note("Could not open Settings; use Settings → Clavis profile.");
     }
   };
+
+  // Unread counters: a red pill with the number of unread messages (99+ above
+  // 99) on every channel and DM row in the sidebar, instead of Buzz's white,
+  // bold row. Buzz 1.0 itself only makes the row bold. The number is Buzz's
+  // own count (session.unread), the same one it uses for the bold row. Muted
+  // channels only get a counter for mentions. Isolated like the other features.
+  try {
+    const STYLE_ID = "clavis-unread-style";
+    const BADGE = "clavis-unread-count";
+    const ROW = "[data-channel-sidebar-row]";
+    const BUTTON = "button[data-channel-id]";
+    if (typeof document === "undefined" || typeof MutationObserver === "undefined")
+      throw new Error("no DOM access in this Buzz version");
+    ctx.effect(() => {
+      const style = document.createElement("style");
+      style.id = STYLE_ID;
+      style.textContent = `
+.${BADGE} {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0; box-sizing: border-box;
+  min-width: 1.125rem; height: 1.125rem; padding: 0 0.3125rem;
+  margin-inline-start: auto; border-radius: 999px;
+  background: #e5242b !important; color: #fff !important;
+  font-size: 0.6875rem; font-weight: 700 !important; line-height: 1;
+  font-variant-numeric: tabular-nums; pointer-events: none;
+}
+/* No white, bold row: the red counter shows that there is something new. */
+${ROW}[data-clavis-unread] ${BUTTON} span:not(.${BADGE}):not([data-channel-row-icon]):not([data-channel-row-icon] *):not([role="img"]) {
+  color: inherit !important; font-weight: inherit !important;
+}
+/* The counter replaces Buzz's small mention dot on the same row. */
+${ROW}[data-clavis-unread] [data-channel-priority] { display: none !important; }
+`;
+      document.getElementById(STYLE_ID)?.remove();
+      document.head.appendChild(style);
+
+      const subs = new Map(); // channelId -> unsubscribe
+      let session;
+      let frame = 0;
+      const schedule = () => {
+        if (!frame) frame = requestAnimationFrame(paint);
+      };
+      const clearSubs = () => {
+        subs.forEach((off) => { try { off(); } catch {} });
+        subs.clear();
+      };
+      const mutedIds = () => {
+        try {
+          const s = session?.sidebarPreferences?.snapshot?.();
+          return new Set(s?.data?.muted ?? []);
+        } catch {
+          return new Set();
+        }
+      };
+      // Number to show for one row, or 0 for none.
+      const countFor = (row, button, channelId, muted) => {
+        const unread = session?.unread;
+        if (typeof unread?.snapshot === "function") {
+          const target = { kind: "channel", channelId };
+          if (!subs.has(channelId) && typeof unread.subscribe === "function")
+            subs.set(channelId, unread.subscribe(target, schedule));
+          const snap = unread.snapshot(target);
+          const shown = snap.row ?? snap;
+          const count = shown.observedCount ?? 0;
+          const attention = shown.attentionCount ?? 0;
+          if (muted) return attention;
+          if (count > 0) return count;
+          return snap.manual && snap.manual !== "none" ? 1 : 0;
+        }
+        // Fallback: Buzz's own accessible label, "12 observed unread messages…".
+        const marker = button.querySelector("[data-channel-unread]:not([data-channel-muted])");
+        if (!marker) return 0;
+        const n = /^(\d+)/.exec(marker.getAttribute("aria-label") ?? "");
+        return n ? Number(n[1]) : 1;
+      };
+      function paint() {
+        frame = 0;
+        const c = relay.snapshot();
+        const next = c.status === "ready" ? c.session : undefined;
+        if (next !== session) {
+          clearSubs();
+          session = next;
+        }
+        const muted = mutedIds();
+        const seen = new Set();
+        for (const row of document.querySelectorAll(ROW)) {
+          const button = row.querySelector(BUTTON);
+          if (!button) continue;
+          const channelId = button.getAttribute("data-channel-id");
+          let n = 0;
+          try {
+            seen.add(channelId);
+            n = countFor(row, button, channelId, muted.has(channelId));
+          } catch {}
+          let badge = button.querySelector(`:scope > .${BADGE}`);
+          if (n > 0 && button.getAttribute("aria-current") !== "page") {
+            const text = n > 99 ? "99+" : String(n);
+            if (!badge) {
+              badge = document.createElement("span");
+              badge.className = BADGE;
+              badge.setAttribute("aria-hidden", "true");
+              button.appendChild(badge);
+            }
+            if (badge.textContent !== text) badge.textContent = text;
+            if (!row.hasAttribute("data-clavis-unread")) row.setAttribute("data-clavis-unread", "");
+          } else {
+            badge?.remove();
+            if (row.hasAttribute("data-clavis-unread")) row.removeAttribute("data-clavis-unread");
+          }
+        }
+        // Stop listening to channels that left the sidebar.
+        for (const [id, off] of subs) if (!seen.has(id)) { try { off(); } catch {} subs.delete(id); }
+      }
+
+      // Rows come and go as people scroll, switch community or open sections.
+      // Our own changes are ignored, so this never loops.
+      const observer = new MutationObserver((records) => {
+        for (const r of records) {
+          const nodes = [...r.addedNodes, ...r.removedNodes];
+          if (r.type === "attributes" || nodes.some((n) => !(n.classList?.contains(BADGE) || n.parentElement?.classList?.contains(BADGE))))
+            return schedule();
+        }
+      });
+      observer.observe(document.body, {
+        childList: true, subtree: true,
+        attributes: true, attributeFilter: ["data-ordinary", "aria-current", "data-channel-id"],
+      });
+      const offRelay = relay.subscribe(schedule);
+      schedule();
+      setStatus("unread", "ok");
+      return () => {
+        observer.disconnect();
+        offRelay?.();
+        clearSubs();
+        if (frame) cancelAnimationFrame(frame);
+        document.querySelectorAll(`.${BADGE}`).forEach((b) => b.remove());
+        document.querySelectorAll("[data-clavis-unread]").forEach((r) => r.removeAttribute("data-clavis-unread"));
+        style.remove();
+      };
+    });
+  } catch (error) {
+    setStatus("unread", `off: ${error?.message ?? error}`);
+  }
 
   ctx.pages.register({
     id: "main",
